@@ -1,0 +1,73 @@
+x-app-env: &app-env
+  DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/imgq}
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  LEASE_SECONDS: ${LEASE_SECONDS:-30}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-imgq}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d imgq"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "6379:6379"
+
+  migrate:
+    image: postgres:16-alpine
+    restart: "no"
+    volumes:
+      - ./migrations:/migrations:ro
+    environment:
+      <<: *app-env
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        for f in /migrations/*.sql; do
+          echo "Applying $$f..."
+          psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$$f"
+        done
+        echo "Migrations completed successfully."
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      <<: *app-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: ["python", "-m", "app.worker"]
+    environment:
+      <<: *app-env
+      # SLOW_MS: '20000'
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy

@@ -1,0 +1,204 @@
+version: 2.1
+
+executors:
+  python-executor:
+    docker:
+      - image: cimg/python:3.12.8
+    working_directory: ~/repo
+
+jobs:
+  lint:
+    executor: python-executor
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - pip-cache-v1-{{ checksum "requirements.txt" }}-{{ checksum "requirements-dev.txt" }}
+            - pip-cache-v1-
+      - run:
+          name: Install dependencies
+          command: |
+            python -m venv .venv
+            . .venv/bin/activate
+            pip install --upgrade pip
+            pip install -r requirements-dev.txt
+      - save_cache:
+          key: pip-cache-v1-{{ checksum "requirements.txt" }}-{{ checksum "requirements-dev.txt" }}
+          paths:
+            - ~/.cache/pip
+      - run:
+          name: Run ruff linter
+          command: |
+            . .venv/bin/activate
+            ruff check .
+      - run:
+          name: Run hadolint on Dockerfile
+          command: |
+            curl -sSL -o hadolint "https://github.com/hadolint/hadolint/releases/download/v2.12.0/hadolint-Linux-x86_64"
+            chmod +x hadolint
+            ./hadolint Dockerfile
+
+  unit-tests:
+    executor: python-executor
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - pip-cache-v1-{{ checksum "requirements.txt" }}-{{ checksum "requirements-dev.txt" }}
+            - pip-cache-v1-
+      - run:
+          name: Install dependencies
+          command: |
+            python -m venv .venv
+            . .venv/bin/activate
+            pip install --upgrade pip
+            pip install -r requirements-dev.txt
+      - save_cache:
+          key: pip-cache-v1-{{ checksum "requirements.txt" }}-{{ checksum "requirements-dev.txt" }}
+          paths:
+            - ~/.cache/pip
+      - run:
+          name: Run unit tests with coverage
+          command: |
+            . .venv/bin/activate
+            mkdir -p test-results coverage
+            pytest tests/unit --cov=app --cov-report=term-missing --cov-report=xml:coverage/coverage.xml --cov-report=html:coverage/html --cov-fail-under=70 --junitxml=test-results/unit.xml
+      - store_test_results:
+          path: test-results
+      - store_artifacts:
+          path: coverage
+
+  integration-tests:
+    docker:
+      - image: cimg/python:3.12.8
+        environment:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/imgq
+          REDIS_URL: redis://localhost:6379/0
+      - image: cimg/postgres:16.8
+        environment:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: imgq
+      - image: cimg/redis:7.2.7
+    working_directory: ~/repo
+    steps:
+      - checkout
+      - run:
+          name: Install postgresql-client
+          command: |
+            sudo apt-get update && sudo apt-get install -y postgresql-client
+      - run:
+          name: Wait for services readiness
+          command: |
+            dockerize -wait tcp://localhost:5432 -wait tcp://localhost:6379 -timeout 1m
+            until pg_isready -h localhost -p 5432 -U postgres -d imgq; do
+              echo "Waiting for PostgreSQL..."
+              sleep 1
+            done
+      - run:
+          name: Apply migrations in filename order
+          command: |
+            for f in $(ls migrations/*.sql | sort); do
+              echo "Applying $f..."
+              psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"
+            done
+      - restore_cache:
+          keys:
+            - pip-cache-v1-{{ checksum "requirements.txt" }}-{{ checksum "requirements-dev.txt" }}
+            - pip-cache-v1-
+      - run:
+          name: Install dependencies
+          command: |
+            python -m venv .venv
+            . .venv/bin/activate
+            pip install --upgrade pip
+            pip install -r requirements-dev.txt
+      - run:
+          name: Run integration tests
+          command: |
+            . .venv/bin/activate
+            mkdir -p test-results
+            pytest tests/integration -m integration --junitxml=test-results/integration.xml -v
+      - store_test_results:
+          path: test-results
+
+  secret-scan:
+    docker:
+      - image: zricethezav/gitleaks:v8.24.0
+    working_directory: ~/repo
+    steps:
+      - checkout
+      - run:
+          name: Run gitleaks secret scan across full git history
+          command: |
+            gitleaks detect --verbose --redact
+
+  build-image:
+    executor: python-executor
+    steps:
+      - checkout
+      - setup_remote_docker:
+          version: default
+      - run:
+          name: Build Docker image
+          command: |
+            docker build -t imgq:1.0 .
+      - run:
+          name: Smoke test container
+          command: |
+            docker run -d --name smoke-test -p 8080:8080 imgq:1.0
+            sleep 2
+            USER_ID=$(docker exec smoke-test id -u)
+            echo "Container running as UID: $USER_ID"
+            if [ "$USER_ID" -eq 0 ]; then
+              echo "ERROR: Container is running as root!"
+              exit 1
+            fi
+            docker stop smoke-test && docker rm smoke-test
+      - run:
+          name: Push to Docker Hub (tag-gated & context credentials)
+          command: |
+            if [ -n "$CIRCLE_TAG" ] && [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
+              echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+              docker tag imgq:1.0 "${DOCKERHUB_USERNAME}/imgq:${CIRCLE_TAG}"
+              docker tag imgq:1.0 "${DOCKERHUB_USERNAME}/imgq:1.0"
+              docker push "${DOCKERHUB_USERNAME}/imgq:${CIRCLE_TAG}"
+              docker push "${DOCKERHUB_USERNAME}/imgq:1.0"
+            else
+              echo "Skipping Docker Hub push (no git tag or credentials not configured)."
+            fi
+
+workflows:
+  version: 2
+  pipeline:
+    jobs:
+      - lint:
+          filters:
+            tags:
+              only: /.*/
+      - unit-tests:
+          requires:
+            - lint
+          filters:
+            tags:
+              only: /.*/
+      - integration-tests:
+          requires:
+            - unit-tests
+          filters:
+            tags:
+              only: /.*/
+      - secret-scan:
+          requires:
+            - integration-tests
+          filters:
+            tags:
+              only: /.*/
+      - build-image:
+          requires:
+            - secret-scan
+          context:
+            - dockerhub
+          filters:
+            tags:
+              only: /.*/
