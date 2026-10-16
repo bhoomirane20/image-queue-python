@@ -398,7 +398,7 @@ HTML_DASHBOARD = """<!DOCTYPE html>
             try {
                 const res = await fetch('/jobs?limit=15');
                 const data = await res.json();
-                
+
                 document.getElementById('stat-queued').textContent = data.summary.queued || 0;
                 document.getElementById('stat-processing').textContent = data.summary.processing || 0;
                 document.getElementById('stat-done').textContent = data.summary.done || 0;
@@ -417,8 +417,8 @@ HTML_DASHBOARD = """<!DOCTYPE html>
                         <td>${j.requested_box.width}×${j.requested_box.height}</td>
                         <td><span class="tag ${j.state}">${j.state}</span></td>
                         <td>
-                            ${j.result_available 
-                                ? `<a href="/jobs/${j.job_id}/result" target="_blank" class="action-link">download_result</a>` 
+                            ${j.result_available
+                                ? `<a href="/jobs/${j.job_id}/result" target="_blank" class="action-link">download_result</a>`
                                 : '<span style="color: var(--muted);">-</span>'}
                             &nbsp;<button onclick="deleteJob(${j.job_id})" class="action-link" style="background:none;border:none;color:#ff5555;cursor:pointer;font-family:var(--code-font);">[delete]</button>
                         </td>
