@@ -7,6 +7,17 @@ executors:
     working_directory: ~/repo
 
 jobs:
+  secret-scan:
+    docker:
+      - image: zricethezav/gitleaks:v8.24.0
+    working_directory: ~/repo
+    steps:
+      - checkout
+      - run:
+          name: Run gitleaks secret scan across git history
+          command: |
+            gitleaks detect --verbose --redact
+
   lint:
     executor: python-executor
     steps:
@@ -122,31 +133,32 @@ jobs:
       - store_test_results:
           path: test-results
 
-  secret-scan:
-    docker:
-      - image: zricethezav/gitleaks:v8.24.0
-    working_directory: ~/repo
-    steps:
-      - checkout
-      - run:
-          name: Run gitleaks secret scan across full git history
-          command: |
-            gitleaks detect --verbose --redact
-
-  build-image:
+  build-and-push:
     executor: python-executor
+    parameters:
+      tag_name:
+        type: string
     steps:
       - checkout
       - setup_remote_docker:
           version: default
       - run:
-          name: Build Docker image
+          name: Build and Push Docker Image
           command: |
-            docker build -t imgq:1.0 .
-      - run:
-          name: Smoke test container
-          command: |
-            docker run -d --name smoke-test -p 8080:8080 imgq:1.0
+            DOCKER_USER="${DOCKERHUB_USER:-$DOCKERHUB_USERNAME}"
+            DOCKER_TOKEN="${DOCKERHUB_TOKEN:-$DOCKERHUB_PASSWORD}"
+            PROJECT="${CIRCLE_PROJECT_REPONAME:-image-queue-python}"
+            MOVING_TAG="<< parameters.tag_name >>"
+            IMMUTABLE_TAG="${CIRCLE_BRANCH}-${CIRCLE_SHA1:0:7}"
+
+            echo "Building image for branch: ${CIRCLE_BRANCH}"
+            echo "Repository: ${DOCKER_USER}/${PROJECT}"
+            echo "Tags: :${MOVING_TAG} and :${IMMUTABLE_TAG}"
+
+            docker build -t "${PROJECT}:build" .
+
+            # Smoke test container to ensure it runs as non-root
+            docker run -d --name smoke-test -p 8080:8080 "${PROJECT}:build"
             sleep 2
             USER_ID=$(docker exec smoke-test id -u)
             echo "Container running as UID: $USER_ID"
@@ -155,50 +167,105 @@ jobs:
               exit 1
             fi
             docker stop smoke-test && docker rm smoke-test
-      - run:
-          name: Push to Docker Hub (tag-gated & context credentials)
-          command: |
-            if [ -n "$CIRCLE_TAG" ] && [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
-              echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
-              docker tag imgq:1.0 "${DOCKERHUB_USERNAME}/imgq:${CIRCLE_TAG}"
-              docker tag imgq:1.0 "${DOCKERHUB_USERNAME}/imgq:1.0"
-              docker push "${DOCKERHUB_USERNAME}/imgq:${CIRCLE_TAG}"
-              docker push "${DOCKERHUB_USERNAME}/imgq:1.0"
+
+            if [ -n "$DOCKER_USER" ] && [ -n "$DOCKER_TOKEN" ]; then
+              echo "$DOCKER_TOKEN" | docker login -u "$DOCKER_USER" --password-stdin
+              docker tag "${PROJECT}:build" "${DOCKER_USER}/${PROJECT}:${MOVING_TAG}"
+              docker tag "${PROJECT}:build" "${DOCKER_USER}/${PROJECT}:${IMMUTABLE_TAG}"
+              docker push "${DOCKER_USER}/${PROJECT}:${MOVING_TAG}"
+              docker push "${DOCKER_USER}/${PROJECT}:${IMMUTABLE_TAG}"
+              echo "Successfully pushed ${DOCKER_USER}/${PROJECT}:${MOVING_TAG} and ${DOCKER_USER}/${PROJECT}:${IMMUTABLE_TAG}"
             else
-              echo "Skipping Docker Hub push (no git tag or credentials not configured)."
+              echo "ERROR: DOCKERHUB_USER or DOCKERHUB_TOKEN environment variables not set in CircleCI!"
+              exit 1
             fi
 
 workflows:
   version: 2
-  pipeline:
+  qa-pipeline:
     jobs:
-      - lint:
+      - secret-scan:
           filters:
-            tags:
-              only: /.*/
+            branches:
+              only: main
+      - lint:
+          requires:
+            - secret-scan
+          filters:
+            branches:
+              only: main
       - unit-tests:
           requires:
             - lint
           filters:
-            tags:
-              only: /.*/
+            branches:
+              only: main
       - integration-tests:
           requires:
             - unit-tests
           filters:
-            tags:
-              only: /.*/
-      - secret-scan:
+            branches:
+              only: main
+      - build-and-push:
+          name: push-qa
+          tag_name: "qa"
           requires:
             - integration-tests
           filters:
-            tags:
-              only: /.*/
-      - build-image:
+            branches:
+              only: main
+
+  staging-pipeline:
+    jobs:
+      - build-and-push:
+          name: push-stage
+          tag_name: "stage"
+          filters:
+            branches:
+              only: staging
+
+  prod-pipeline:
+    jobs:
+      - build-and-push:
+          name: push-prod
+          tag_name: "prod"
+          filters:
+            branches:
+              only: prod
+
+  pr-validation:
+    jobs:
+      - secret-scan:
+          filters:
+            branches:
+              ignore:
+                - main
+                - staging
+                - prod
+      - lint:
           requires:
             - secret-scan
-          context:
-            - dockerhub
           filters:
-            tags:
-              only: /.*/
+            branches:
+              ignore:
+                - main
+                - staging
+                - prod
+      - unit-tests:
+          requires:
+            - lint
+          filters:
+            branches:
+              ignore:
+                - main
+                - staging
+                - prod
+      - integration-tests:
+          requires:
+            - unit-tests
+          filters:
+            branches:
+              ignore:
+                - main
+                - staging
+                - prod
