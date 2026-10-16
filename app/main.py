@@ -420,11 +420,27 @@ HTML_DASHBOARD = """<!DOCTYPE html>
                             ${j.result_available 
                                 ? `<a href="/jobs/${j.job_id}/result" target="_blank" class="action-link">download_result</a>` 
                                 : '<span style="color: var(--muted);">-</span>'}
+                            &nbsp;<button onclick="deleteJob(${j.job_id})" class="action-link" style="background:none;border:none;color:#ff5555;cursor:pointer;font-family:var(--code-font);">[delete]</button>
                         </td>
                     </tr>
                 `).join('');
             } catch (err) {
                 console.error(err);
+            }
+        }
+
+        async function deleteJob(id) {
+            if (!confirm(`Delete job #${id}?`)) return;
+            try {
+                const res = await fetch(`/jobs/${id}`, { method: 'DELETE' });
+                if (res.ok) {
+                    fetchJobs();
+                } else {
+                    const err = await res.json();
+                    alert('error: ' + (err.detail || 'failed to delete'));
+                }
+            } catch (err) {
+                alert('error: ' + err.message);
             }
         }
 
