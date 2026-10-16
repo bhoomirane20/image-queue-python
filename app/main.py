@@ -398,7 +398,7 @@ HTML_DASHBOARD = """<!DOCTYPE html>
             try {
                 const res = await fetch('/jobs?limit=15');
                 const data = await res.json();
-                
+
                 document.getElementById('stat-queued').textContent = data.summary.queued || 0;
                 document.getElementById('stat-processing').textContent = data.summary.processing || 0;
                 document.getElementById('stat-done').textContent = data.summary.done || 0;
@@ -417,14 +417,30 @@ HTML_DASHBOARD = """<!DOCTYPE html>
                         <td>${j.requested_box.width}×${j.requested_box.height}</td>
                         <td><span class="tag ${j.state}">${j.state}</span></td>
                         <td>
-                            ${j.result_available 
-                                ? `<a href="/jobs/${j.job_id}/result" target="_blank" class="action-link">download_result</a>` 
+                            ${j.result_available
+                                ? `<a href="/jobs/${j.job_id}/result" target="_blank" class="action-link">download_result</a>`
                                 : '<span style="color: var(--muted);">-</span>'}
+                            &nbsp;<button onclick="deleteJob(${j.job_id})" class="action-link" style="background:none;border:none;color:#ff5555;cursor:pointer;font-family:var(--code-font);">[delete]</button>
                         </td>
                     </tr>
                 `).join('');
             } catch (err) {
                 console.error(err);
+            }
+        }
+
+        async function deleteJob(id) {
+            if (!confirm(`Delete job #${id}?`)) return;
+            try {
+                const res = await fetch(`/jobs/${id}`, { method: 'DELETE' });
+                if (res.ok) {
+                    fetchJobs();
+                } else {
+                    const err = await res.json();
+                    alert('error: ' + (err.detail || 'failed to delete'));
+                }
+            } catch (err) {
+                alert('error: ' + err.message);
             }
         }
 
@@ -571,6 +587,21 @@ def retry(job_id: int):
     cache.client().zrem(RETRY, str(job_id))
     push(job_id)
     return {"job_id": job_id, "state": "queued", "attempts": row["attempts"]}
+
+
+@app.delete("/jobs/{job_id}")
+def delete_job(job_id: int):
+    """Delete a job record from the database and purge active queue/lease entries."""
+    row = db.one("SELECT id, state FROM jobs WHERE id=%s", (job_id,))
+    if not row:
+        raise HTTPException(404, "no such job")
+    c = cache.client()
+    c.lrem(QUEUE, 0, str(job_id))
+    c.lrem(PROCESSING, 0, str(job_id))
+    c.zrem(RETRY, str(job_id))
+    c.delete(lease_key(job_id))
+    db.query("DELETE FROM jobs WHERE id=%s", (job_id,), fetch=False)
+    return {"deleted": True, "job_id": job_id}
 
 
 @app.post("/admin/reap")
