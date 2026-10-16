@@ -151,38 +151,73 @@ pytest tests/integration -m integration -v
 
 ---
 
-## CI/CD Overview
+## CI/CD Pipeline & Branch Promotion
 
-The pipeline is implemented in `.circleci/config.yml` with strict dependency ordering:
+The pipeline is implemented in `.circleci/config.yml` with strict dependency ordering and environment-gated promotion workflows:
 
+### 1. QA Pipeline (`main` branch)
+Every merged pull request into `main` triggers the full automated pipeline:
 ```
-lint ──► unit-tests ──► integration-tests ──► secret-scan ──► build-image
+secret-scan ──► lint ──► unit-tests ──► integration-tests ──► push-qa
 ```
+- **`secret-scan`**: Scans git commit history using `gitleaks` (`zricethezav/gitleaks:v8.24.0`).
+- **`lint`**: Runs `ruff check .` and `hadolint Dockerfile`.
+- **`unit-tests`**: Runs `pytest tests/unit` with coverage threshold enforcement (`>= 70%`).
+- **`integration-tests`**: Runs against real `postgres:16.8` and `redis:7.2.7` service containers on `localhost`.
+- **`push-qa`**: Builds the Docker image and pushes two tags to Docker Hub:
+  - Moving tag: `:qa`
+  - Immutable tag: `:main-<short-sha>`
 
-1. **`lint`**:
-   - Executes `ruff check .` for PEP8 compliance, bug detection, and style.
-   - Executes `hadolint Dockerfile` for container best practices (pinned digest, non-root user, clean layer caching).
-2. **`unit-tests`**:
-   - Runs `pytest tests/unit` with coverage tracking against `app`.
-   - Enforces coverage threshold `>= 70%`.
-   - Stores JUnit XML test results and HTML/XML coverage artifacts.
-3. **`integration-tests`**:
-   - Primary `cimg/python:3.12.8` executor with `cimg/postgres:16.8` and `cimg/redis:7.2.7` service containers accessible on `localhost`.
-   - Installs `postgresql-client`, waits for database readiness, applies `migrations/*.sql` in filename order, and executes `@pytest.mark.integration` test suite.
-4. **`secret-scan`**:
-   - Executes `zricethezav/gitleaks:v8.24.0` across the full git commit history to detect leaked credentials, tokens, or private keys.
-5. **`build-image`**:
-   - Uses `setup_remote_docker` to build `imgq:1.0`.
-   - Smoke tests the container: verifies it runs in detached mode, confirms the execution UID is non-root (`UID=999`).
-   - Tag-gated push to Docker Hub using context credentials (`DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`).
+### 2. Staging & Production Pipelines (`staging` & `prod` branches)
+- **Staging (`push-stage`)**: Build-only. No test stages. Pushes moving tag `:stage` and immutable tag `:staging-<short-sha>`.
+- **Production (`push-prod`)**: Build-only. No test stages. Pushes moving tag `:prod` and immutable tag `:prod-<short-sha>`.
 
-### Manual Docker Hub Push Commands
-To push the image to your Docker Hub repository:
+---
+
+## Kubernetes Across Three Namespaces (`qa`, `stage`, `prod`)
+
+Manifests are organized under `k8s/`:
+- `k8s/namespaces.yaml`: Declares `qa`, `stage`, and `prod` namespaces.
+- `k8s/qa/`, `k8s/stage/`, `k8s/prod/`: Independent environment deployments for `postgres` (with schema ConfigMap), `redis`, `web` (FastAPI dashboard & API), and `worker`.
+- Pull secrets (`dockerhub`) configured in each namespace and referenced in Pod specs via `imagePullSecrets`.
+- Pods use `imagePullPolicy: Always` on moving tags (`:qa`, `:stage`, `:prod`).
+
+### One-Command Setup
 ```bash
-docker login
-docker tag imgq:1.0 <your-dockerhub-username>/imgq:1.0
-docker push <your-dockerhub-username>/imgq:1.0
+./k8s/setup.sh <your-dockerhub-username> <your-dockerhub-token>
 ```
+
+### Demonstrating the Deployment Loop
+1. Merge pull request into `main`.
+2. CircleCI builds and pushes `:qa` (and `:main-<sha>`).
+3. Rollout restart the deployment:
+   ```bash
+   kubectl rollout restart deployment/web -n qa
+   kubectl rollout status deployment/web -n qa
+   ```
+4. Verify running image and digest:
+   ```bash
+   kubectl get pods -n qa -o jsonpath='{range .items[*]}{.spec.containers[*].image}{"\n"}{end}'
+   kubectl describe pod $(kubectl get pods -n qa -l app=web -o jsonpath="{.items[0].metadata.name}") -n qa | grep -i "image id"
+   ```
+
+---
+
+## API Endpoints (Full CRUD Support)
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/` | Web Dashboard with live status and actions |
+| `GET` | `/health` | Service health status (Postgres + Redis checks) |
+| `POST` | `/jobs` | Upload image and enqueue resize job |
+| `GET` | `/jobs` | List recent jobs and queue state summary |
+| `GET` | `/jobs/{id}` | Inspect single job status and TTL |
+| `GET` | `/jobs/{id}/result` | Download output PNG image |
+| `POST` | `/jobs/{id}/retry` | Re-queue a failed job |
+| `DELETE` | `/jobs/{id}` | Delete job from Postgres and purge Redis queue/lease |
+| `POST` | `/admin/reap` | Trigger reaper for dead worker leases |
+| `GET` | `/stats` | Aggregated throughput and latency statistics |
+
 
 ---
 
