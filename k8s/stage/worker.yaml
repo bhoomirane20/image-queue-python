@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: stage
+  labels:
+    app: worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      imagePullSecrets:
+        - name: dockerhub
+      containers:
+        - name: worker
+          image: bhoomirane20/image-queue-python:stage
+          imagePullPolicy: Always
+          command: ["python", "-m", "app.worker"]
+          env:
+            - name: DATABASE_URL
+              value: "postgresql://postgres:postgres@postgres:5432/imgq"
+            - name: REDIS_URL
+              value: "redis://redis:6379/0"
+            - name: LEASE_SECONDS
+              value: "30"

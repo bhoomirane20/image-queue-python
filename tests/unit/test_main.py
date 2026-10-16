@@ -251,3 +251,24 @@ def test_stats():
         assert "summary" in data
         assert "queue" in data
         assert "slowest" in data
+
+
+def test_delete_job_success():
+    with patch("app.db.one", return_value={"id": 42, "state": "queued"}), \
+         patch("app.cache.client") as mock_cache, \
+         patch("app.db.query") as mock_query:
+        mock_c = MagicMock()
+        mock_cache.return_value = mock_c
+        res = client.delete("/jobs/42")
+        assert res.status_code == 200
+        assert res.json() == {"deleted": True, "job_id": 42}
+        mock_query.assert_called_once()
+        mock_c.delete.assert_called_once()
+
+
+def test_delete_job_not_found():
+    with patch("app.db.one", return_value=None):
+        res = client.delete("/jobs/999")
+        assert res.status_code == 404
+        assert res.json()["detail"] == "no such job"
+
