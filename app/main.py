@@ -573,6 +573,21 @@ def retry(job_id: int):
     return {"job_id": job_id, "state": "queued", "attempts": row["attempts"]}
 
 
+@app.delete("/jobs/{job_id}")
+def delete_job(job_id: int):
+    """Delete a job record from the database and purge active queue/lease entries."""
+    row = db.one("SELECT id, state FROM jobs WHERE id=%s", (job_id,))
+    if not row:
+        raise HTTPException(404, "no such job")
+    c = cache.client()
+    c.lrem(QUEUE, 0, str(job_id))
+    c.lrem(PROCESSING, 0, str(job_id))
+    c.zrem(RETRY, str(job_id))
+    c.delete(lease_key(job_id))
+    db.query("DELETE FROM jobs WHERE id=%s", (job_id,), fetch=False)
+    return {"deleted": True, "job_id": job_id}
+
+
 @app.post("/admin/reap")
 def reap():
     """Put back anything a dead worker was holding.
