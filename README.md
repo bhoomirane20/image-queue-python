@@ -2,7 +2,7 @@
 
 **Language:** Python 3.12 (FastAPI) &nbsp;|&nbsp; **Storage & Broker:** PostgreSQL 16 + Redis 7
 
-A production-grade, distributed asynchronous image resizing pipeline built with FastAPI, a standalone background worker, PostgreSQL for durable job persistence, and Redis for crash-resilient queue management .
+A production-grade, distributed asynchronous image resizing pipeline built with FastAPI, a standalone background worker, PostgreSQL for durable job persistence, and Redis for crash-resilient queue management and functions.
 
 ---
 
