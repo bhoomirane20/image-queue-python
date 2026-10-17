@@ -15,12 +15,10 @@ spec:
       labels:
         app: worker
     spec:
-      imagePullSecrets:
-        - name: dockerhub
       containers:
         - name: worker
-          image: bhoomirane20/image-queue-python:qa
-          imagePullPolicy: Always
+          image: image-queue-python:qa
+          imagePullPolicy: IfNotPresent
           command: ["python", "-m", "app.worker"]
           env:
             - name: DATABASE_URL
